@@ -1,0 +1,7 @@
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\obj\x64\Debug\net472\HDTAutoDeckSync.csproj.AssemblyReference.cache
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\obj\x64\Debug\net472\HDTAutoDeckSync.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\obj\x64\Debug\net472\HDTAutoDeckSync.csproj.CoreCompileInputs.cache
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\bin\x64\Debug\net472\AutoDeckSync.dll
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\bin\x64\Debug\net472\AutoDeckSync.pdb
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\obj\x64\Debug\net472\AutoDeckSync.dll
+C:\Users\meeyaboss\source\repos\HDTAutoDeckSync\HDTAutoDeckSync\obj\x64\Debug\net472\AutoDeckSync.pdb

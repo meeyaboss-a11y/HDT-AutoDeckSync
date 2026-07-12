@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net472</TargetFramework>
+		<OutputType>Library</OutputType>
+
+		<UseWPF>true</UseWPF>
+
+		<AssemblyName>AutoDeckSync</AssemblyName>
+		<RootNamespace>AutoDeckSync</RootNamespace>
+
+		<LangVersion>latest</LangVersion>
+		<Nullable>disable</Nullable>
+
+		<!-- HDTは64bitネイティブアプリのため、プラグインもx64でビルドする必要がある -->
+		<PlatformTarget>x64</PlatformTarget>
+		<Platforms>x64</Platforms>
+
+		<!-- SDK形式プロジェクトの自動アセンブリ属性生成と、
+		     既存の Properties\AssemblyInfo.cs (もしあれば) との重複を防ぐ -->
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+	</PropertyGroup>
+
+	<ItemGroup>
+	  <Compile Remove="DeckSyncService_old.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Reference Include="HearthstoneDeckTracker">
+			<HintPath>$(LocalAppData)\HearthstoneDeckTracker\app-1.53.7\HearthstoneDeckTracker.exe</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="HearthMirror">
+			<HintPath>$(LocalAppData)\HearthstoneDeckTracker\app-1.53.7\HearthMirror.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+	</ItemGroup>
+
+</Project>
