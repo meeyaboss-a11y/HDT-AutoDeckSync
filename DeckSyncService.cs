@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Windows;
@@ -12,14 +11,9 @@ namespace AutoDeckSync
 {
     public class DeckSyncService : IDisposable
     {
-        private static readonly TimeSpan ModeWatchInterval = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan FallbackPollInterval = TimeSpan.FromMinutes(2);
         private const string CollectionModeName = "COLLECTIONMANAGER";
 
         private readonly object _syncLock = new object();
-
-        private Timer _modeWatchTimer;
-        private Timer _fallbackPollTimer;
         private string _lastMode;
         private bool _started;
         private bool _disposed;
@@ -27,7 +21,6 @@ namespace AutoDeckSync
 
         public DeckSyncService()
         {
-            // 不要になった sync.log のパス定義やディレクトリ作成処理を完全に削除しました
         }
 
         public void Start()
@@ -35,12 +28,13 @@ namespace AutoDeckSync
             if (_started) return;
             _started = true;
 
+            // 対戦終了時の自動同期イベント
             GameEvents.OnGameEnd.Add(OnGameEnd);
-            _modeWatchTimer = new Timer(_ => WatchMode(), null, ModeWatchInterval, ModeWatchInterval);
-            _fallbackPollTimer = new Timer(_ => RunNow(), null, FallbackPollInterval, FallbackPollInterval);
 
-            // 起動ログをHDT公式へ統合（不要ならこの行ごと削除しても構いません）
-            Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("[AutoDeckSync] Started.");
+            // 💡 引数の型ミスマッチを避けるため、ラムダ式 `_ => OnModeChanged()` でイベントを受け取ります
+            GameEvents.OnModeChanged.Add(_ => OnModeChanged());
+
+            Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("[AutoDeckSync] Started (Event-driven mode).");
         }
 
         public void RunNow()
@@ -54,15 +48,20 @@ namespace AutoDeckSync
             ScheduleSync();
         }
 
-        private void WatchMode()
+        private void OnModeChanged()
         {
             if (_disposed) return;
+
+            var game = Hearthstone_Deck_Tracker.API.Core.Game;
+            if (game == null) return;
+
+            // 🛑 エラーの原因だった `IsGameplay` を削除しました。
+            // 代わりに、下の `IsInMenu` 判定を厳格に使うことで対戦中を安全に弾きます。
 
             string currentMode;
             try
             {
-                var game = Hearthstone_Deck_Tracker.API.Core.Game;
-                currentMode = game?.CurrentMode.ToString();
+                currentMode = game.CurrentMode.ToString();
             }
             catch
             {
@@ -72,6 +71,7 @@ namespace AutoDeckSync
             var previousMode = _lastMode;
             _lastMode = currentMode;
 
+            // コレクション画面に入った瞬間、または出た瞬間だけ同期を起動
             if (previousMode != currentMode)
             {
                 if (currentMode == CollectionModeName || previousMode == CollectionModeName)
@@ -139,9 +139,10 @@ namespace AutoDeckSync
         private bool Sync()
         {
             var game = Hearthstone_Deck_Tracker.API.Core.Game;
+            if (game == null) return true;
 
-            bool isInMenuOrTransition = (game != null && game.IsInMenu) || !string.IsNullOrEmpty(_lastMode);
-            if (game == null || !isInMenuOrTransition)
+            // 🛑【厳重ガード】メニュー画面内（IsInMenuがtrue）ではない＝対戦中や観戦中などは即終了します
+            if (!game.IsInMenu)
             {
                 return true;
             }
@@ -175,7 +176,6 @@ namespace AutoDeckSync
             }
             catch (Exception ex)
             {
-                // ⚠️ 例外エラーが発生した場合のみHDT公式ログへ記録
                 Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("[AutoDeckSync Error] Could not read decks from Reflection Client: " + ex.Message);
                 return true;
             }
@@ -197,10 +197,9 @@ namespace AutoDeckSync
                 return true;
             }
 
-            // ★★★【進化した全消し拒否ロック】★★★
+            // 【全消し拒否ロック】
             if (removed.Count >= candidates.Count && rawMirrorCount > 0)
             {
-                // ⚠️ メモリ読み込み異常と思われる全消去をブロックした「重大な警告」のみ記録
                 Hearthstone_Deck_Tracker.Utility.Logging.Log.Info($"[AutoDeckSync CRITICAL] Blocked mass-deletion! Attempted to remove all {removed.Count} decks, but HearthMirror still sees {rawMirrorCount} decks.");
                 return true;
             }
@@ -235,12 +234,6 @@ namespace AutoDeckSync
 
             _syncCts?.Cancel();
             _syncCts?.Dispose();
-
-            _modeWatchTimer?.Dispose();
-            _modeWatchTimer = null;
-
-            _fallbackPollTimer?.Dispose();
-            _fallbackPollTimer = null;
 
             Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("[AutoDeckSync] Stopped.");
         }
