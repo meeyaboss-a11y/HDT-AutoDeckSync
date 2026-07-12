@@ -3,18 +3,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
-using System.Threading.Tasks;
-using System.Windows; // UIスレッド（Dispatcher）操作のために必要
+using System.Windows; // System.Windows.Application を使うために追加
 using Hearthstone_Deck_Tracker;
 using Hearthstone_Deck_Tracker.API;
 using Hearthstone_Deck_Tracker.Hearthstone;
 
 namespace AutoDeckSync
 {
-    /// <summary>
-    /// HDT上に残っている「実際にはもうHearthstone本体に存在しないデッキ」を検出し、
-    /// 自動的にHDTのデッキリストから取り除くプラグインサービス。
-    /// </summary>
     public class DeckSyncService : IDisposable
     {
         private static readonly TimeSpan ModeWatchInterval = TimeSpan.FromSeconds(1);
@@ -22,7 +17,6 @@ namespace AutoDeckSync
         private const string CollectionModeName = "COLLECTIONMANAGER";
 
         private readonly object _syncLock = new object();
-        private readonly SemaphoreSlim _syncSemaphore = new SemaphoreSlim(1, 1);
         private readonly string _logFilePath;
 
         private Timer _modeWatchTimer;
@@ -30,6 +24,7 @@ namespace AutoDeckSync
         private string _lastMode;
         private bool _started;
         private bool _disposed;
+        private CancellationTokenSource _syncCts;
 
         public DeckSyncService()
         {
@@ -43,13 +38,8 @@ namespace AutoDeckSync
             if (_started) return;
             _started = true;
 
-            // 対戦終了イベントの購読
             GameEvents.OnGameEnd.Add(OnGameEnd);
-
-            // 画面モードの変更を監視する軽量タイマー
             _modeWatchTimer = new Timer(_ => WatchMode(), null, ModeWatchInterval, ModeWatchInterval);
-
-            // 保険としての低頻度チェック
             _fallbackPollTimer = new Timer(_ => RunNow(), null, FallbackPollInterval, FallbackPollInterval);
 
             Log("AutoDeckSync started.");
@@ -102,40 +92,38 @@ namespace AutoDeckSync
 
         private void ScheduleSync()
         {
-            // CancellationTokenによる途中キャンセルを廃止し、セマフォでタスクを1列に並べて順番待ちさせます。
-            // これにより、画面開閉が高速で連打されても、前の削除処理が途中でぶった切られるのを防ぎます。
-            ThreadPool.QueueUserWorkItem(async _ =>
-            {
-                if (_disposed) return;
+            _syncCts?.Cancel();
+            _syncCts = new CancellationTokenSource();
+            var token = _syncCts.Token;
 
-                await _syncSemaphore.WaitAsync();
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
                 try
                 {
-                    // 画面遷移アニメーションやロードのラグを安全に吸収するため、少し長めに待機
-                    Thread.Sleep(2500);
-                    TrySyncWithRetries(3);
+                    Thread.Sleep(2000);
+                    TrySyncWithRetries(5, token);
                 }
                 catch (Exception ex)
                 {
                     Log("ScheduleSync error: " + ex.Message);
                 }
-                finally
-                {
-                    _syncSemaphore.Release();
-                }
             });
         }
 
-        private void TrySyncWithRetries(int maxRetries)
+        private void TrySyncWithRetries(int maxRetries, CancellationToken token)
         {
             if (_disposed) return;
 
             for (int i = 0; i < maxRetries; i++)
             {
-                if (_disposed) return;
+                if (token.IsCancellationRequested || _disposed)
+                {
+                    Log("Sync task cancelled due to newer event.");
+                    return;
+                }
 
                 bool success = false;
-                lock (_syncLock)
+                if (Monitor.TryEnter(_syncLock))
                 {
                     try
                     {
@@ -144,14 +132,21 @@ namespace AutoDeckSync
                     catch (Exception ex)
                     {
                         Log("Sync failed with an unexpected error: " + ex);
-                        success = true; // 予期せぬ例外時は安全のためリトライを停止
+                        success = true;
+                    }
+                    finally
+                    {
+                        Monitor.Exit(_syncLock);
                     }
                 }
 
-                if (success || _disposed) break;
+                if (success || _disposed || token.IsCancellationRequested) break;
 
-                Log($"Memory not ready. Retrying in 2 seconds... (Attempt {i + 1}/{maxRetries})");
-                Thread.Sleep(2000);
+                if (i < maxRetries - 1)
+                {
+                    Log($"Decks not fully loaded yet. Retrying in 2 seconds... (Attempt {i + 1}/{maxRetries})");
+                    Thread.Sleep(2000);
+                }
             }
         }
 
@@ -159,38 +154,46 @@ namespace AutoDeckSync
         {
             var game = Hearthstone_Deck_Tracker.API.Core.Game;
 
-            // 【安全判定】メニュー内にいるか、または直前までコレクション画面にいた（_lastModeが記録されている）状態
-            // どちらにも当てはまらない完全な「対戦中」などの時だけ処理をスキップします。
+            // 1. 【安全判定】メニュー内にいるか、または直前までコレクション画面にいた状態
             bool isInMenuOrTransition = (game != null && game.IsInMenu) || !string.IsNullOrEmpty(_lastMode);
-
             if (game == null || !isInMenuOrTransition)
             {
                 return true;
             }
 
+            // 【プロセスチェック】ゲーム自体が生きているか物理チェック
+            var processes = System.Diagnostics.Process.GetProcessesByName("Hearthstone");
+            if (processes.Length == 0)
+            {
+                Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("Hearthstone process not found. Skipping sync for safety.");
+                return true;
+            }
+
             List<long> liveDeckIds = new List<long>();
+            int rawMirrorCount = 0;
+
             try
             {
-                // メモリ上の生データを直接参照
                 var mirrorDecks = HearthMirror.Reflection.Client.GetDecks();
 
                 if (mirrorDecks == null)
                 {
-                    // コレクション画面のログ（_lastMode）が残っている状態での null は「デッキが本当に0件」の挙動です。
-                    // ロード未完了と誤認させず、空のリストとしてそのまま下へ流します。
-                    if (!string.IsNullOrEmpty(_lastMode))
-                    {
-                        Log("HearthMirror returned null (0 decks verified in memory).");
-                    }
-                    else
-                    {
-                        Log("HearthMirror returned null (Process not ready).");
-                        return false; // 本当にゲームプロセスが読めない状態のときだけリトライ
-                    }
+                    // 💡 return true に修正：削除を行わず、HDTのシステムをロックせずに安全にスルーします
+                    Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("HearthMirror returned null. Process might be lagging. Skipping this tick.");
+                    return true;
                 }
                 else
                 {
-                    Log($"HearthMirror reported {mirrorDecks.Count} raw decks in memory.");
+                    // メモリ上のデッキが0件の場合、一時的な読み込みエラーの可能性が非常に高いです。
+                    // 💡 ここも return true に修正：全消しに進まず、安全に今回の同期をスルーします
+                    if (mirrorDecks.Count == 0)
+                    {
+                        Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("HearthMirror reported 0 decks. Skipping to prevent total wipe.");
+                        return true;
+                    }
+
+                    Hearthstone_Deck_Tracker.Utility.Logging.Log.Info($"HearthMirror reported {mirrorDecks.Count} raw decks in memory.");
+                    rawMirrorCount = mirrorDecks.Count;
 
                     liveDeckIds = mirrorDecks
                         .Where(d => d != null)
@@ -202,7 +205,7 @@ namespace AutoDeckSync
             }
             catch (Exception ex)
             {
-                Log("Could not read decks from Reflection Client: " + ex.Message);
+                Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("Could not read decks from Reflection Client: " + ex.Message);
                 return true;
             }
 
@@ -220,11 +223,18 @@ namespace AutoDeckSync
 
             if (removed.Count == 0)
             {
-                Log($"Sync complete. Both lists match. (Active: {liveDeckIds.Count} decks)");
+                Hearthstone_Deck_Tracker.Utility.Logging.Log.Info($"Sync complete. Both lists match. (Active: {liveDeckIds.Count} decks)");
                 return true;
             }
 
-            // UIスレッドを絶対に途中で殺させないためのInvoke
+            // ★★★【進化した全消し拒否ロック】★★★
+            if (removed.Count >= candidates.Count && rawMirrorCount > 0)
+            {
+                Hearthstone_Deck_Tracker.Utility.Logging.Log.Info($"[CRITICAL WARNING] Blocked mass-deletion! Attempted to remove all {removed.Count} decks, but HearthMirror still sees {rawMirrorCount} decks in game. This is a reading discrepancy.");
+                return true;
+            }
+
+            // UIスレッドでの削除処理
             Application.Current.Dispatcher.Invoke(() =>
             {
                 try
@@ -233,19 +243,16 @@ namespace AutoDeckSync
                     {
                         DeckList.Instance.Decks.Remove(deck);
                     }
-
-                    // ObservableCollection の挙動により、Remove された時点で
-                    // HDTの画面からは自動的に消えるようになっています。
                     DeckList.Save();
                 }
                 catch (Exception ex)
                 {
-                    Log("Error removing decks on UI thread: " + ex);
+                    Hearthstone_Deck_Tracker.Utility.Logging.Log.Info("Error removing decks on UI thread: " + ex);
                 }
             });
 
             var names = string.Join(", ", removed.Select(d => $"{d.Name} [{d.Class}]"));
-            Log($"[SUCCESS] Actually removed {removed.Count} deck(s) from HDT: {names}");
+            Hearthstone_Deck_Tracker.Utility.Logging.Log.Info($"[SUCCESS] Actually removed {removed.Count} deck(s) from HDT: {names}");
 
             return true;
         }
@@ -272,13 +279,14 @@ namespace AutoDeckSync
             if (_disposed) return;
             _disposed = true;
 
+            _syncCts?.Cancel();
+            _syncCts?.Dispose();
+
             _modeWatchTimer?.Dispose();
             _modeWatchTimer = null;
 
             _fallbackPollTimer?.Dispose();
             _fallbackPollTimer = null;
-
-            _syncSemaphore?.Dispose();
 
             Log("AutoDeckSync stopped.");
         }
