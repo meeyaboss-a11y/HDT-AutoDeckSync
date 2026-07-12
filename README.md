@@ -7,6 +7,7 @@ This HDT plugin automatically detects and removes decks from your Hearthstone De
 コレクション画面を閉じた時（または対戦終了時）に、メモリ上のデッキとHDTのリストを自動同期します。
 万が一の同期失敗に備え、ゲーム内のデッキが0件として検出された場合は同期処理を行いません。
 余計な外部DLLに依存せず、HDTの標準APIのみで動作するため軽量ですが、環境によっては動作が不安定になり、HDTが正常に機能しなくなるリスクがあるかもしれません。導入は自己責任でお願いいたします。
+
 Automatically synchronizes your HDT deck list when leaving the Collection manager or after a match.
 To safeguard against synchronization failures, the process will be skipped entirely if no decks are detected in game.
 Completely lightweight and depending only on native HDT APIs, however, there may be a risk of instability causing HDT to malfunction depending on your environment. Please use this plugin at your own risk.
